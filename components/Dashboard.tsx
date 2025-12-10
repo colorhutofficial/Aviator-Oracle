@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Plane, Activity, SignalHigh, Zap, Clock, TrendingUp } from 'lucide-react';
+import { Plane, Activity, SignalHigh, Zap, PlayCircle, FastForward, ToggleLeft, ToggleRight } from 'lucide-react';
 import { HistoryItem, GameStatus, Prediction } from '../types';
 
 interface DashboardProps {
@@ -22,6 +22,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
   const [multiplier, setMultiplier] = useState<number>(1.00);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [countdown, setCountdown] = useState<number>(0);
+  const [isAutoMode, setIsAutoMode] = useState<boolean>(true);
   
   // Graph state
   const [graphPoints, setGraphPoints] = useState<string>('');
@@ -32,17 +33,58 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
   const startTimeRef = useRef<number>(0);
   const crashPointRef = useRef<number>(0);
   const predictionRef = useRef<Prediction | null>(null);
+  const lastPredictionTypeRef = useRef<'MULTIPLIER' | 'CRASH' | null>(null); // Track strictly for algo
+  const isAutoModeRef = useRef<boolean>(true); 
+  const countdownIntervalRef = useRef<number | null>(null);
+  const autoRestartTimeoutRef = useRef<number | null>(null);
+  const isCycleActiveRef = useRef<boolean>(false); // Strict lock for cycle start
+
+  useEffect(() => {
+    isAutoModeRef.current = isAutoMode;
+    
+    // If we switch to AUTO and we are IDLE or CRASHED, we need to ensure the loop continues
+    if (isAutoMode) {
+        if (!isCycleActiveRef.current && status !== GameStatus.FLYING) {
+             // Clear any existing restart timers to prevent doubles
+             if (autoRestartTimeoutRef.current) clearTimeout(autoRestartTimeoutRef.current);
+             
+             // Short delay to start
+             autoRestartTimeoutRef.current = window.setTimeout(() => {
+                 startGameCycle();
+             }, 500);
+        }
+    } else {
+        // If switching to MANUAL, clear any pending auto-starts
+        if (autoRestartTimeoutRef.current) {
+            clearTimeout(autoRestartTimeoutRef.current);
+            autoRestartTimeoutRef.current = null;
+        }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAutoMode]); 
 
   useEffect(() => {
     audioRef.current = new Audio(CRASH_SOUND_URL);
     audioRef.current.volume = 0.4;
+    return () => {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+        if (autoRestartTimeoutRef.current) clearTimeout(autoRestartTimeoutRef.current);
+    };
   }, []);
 
   const generateRoundId = () => Math.floor(getSecureRandom() * 90000) + 10000;
 
-  const generatePrediction = (): Prediction => {
+  const generatePrediction = useCallback((): Prediction => {
+    // Check strict history ref
+    const previousWasCrash = lastPredictionTypeRef.current === 'CRASH';
+
     // Probability for "PLAY" (CRASH type) outcome set to ~25%
-    const isCrash = getSecureRandom() < 0.25;
+    // FORCE FALSE if previous was crash to avoid consecutive PLAYs
+    const isCrash = previousWasCrash ? false : (getSecureRandom() < 0.25);
+    
+    // Update strict history ref immediately for next call safety
+    lastPredictionTypeRef.current = isCrash ? 'CRASH' : 'MULTIPLIER';
     
     if (isCrash) {
       return { type: 'CRASH', value: 0, confidence: Math.floor(getSecureRandom() * 20) + 75 };
@@ -64,19 +106,30 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
       
       return { type: 'MULTIPLIER', value: parseFloat(safeMulti), confidence: Math.floor(getSecureRandom() * 15) + 80 };
     }
-  };
+  }, []);
 
   const startGameCycle = useCallback(() => {
+    // Strict Locking: Prevent starting if already flying or cycle active
+    if (isCycleActiveRef.current) return;
+    
+    isCycleActiveRef.current = true;
+    
+    // Cleanup previous timers
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    if (autoRestartTimeoutRef.current) clearTimeout(autoRestartTimeoutRef.current);
+
     setStatus(GameStatus.IDLE);
     const newRoundId = generateRoundId().toString();
     setRoundId(newRoundId);
-    setGraphPoints(''); // Reset graph
+    setGraphPoints(''); 
     setPlanePosition({ x: 0, y: 100 });
     
     const newPrediction = generatePrediction();
     setPrediction(newPrediction);
     predictionRef.current = newPrediction;
 
+    // Play sound if prediction is CRASH (PLAY)
     if (newPrediction.type === 'CRASH') {
       if (audioRef.current) {
         audioRef.current.currentTime = 0;
@@ -85,19 +138,19 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
     }
 
     setMultiplier(1.00);
-    setCountdown(5); // Increased countdown slightly for effect
+    setCountdown(5); 
 
     let count = 5;
-    const countInterval = setInterval(() => {
+    countdownIntervalRef.current = window.setInterval(() => {
       count -= 1;
       setCountdown(count);
       if (count <= 0) {
-        clearInterval(countInterval);
+        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
         startFlyingPhase(newRoundId);
       }
     }, 1000);
 
-  }, []);
+  }, [generatePrediction]);
 
   const startFlyingPhase = (currentRoundId: string) => {
     setStatus(GameStatus.FLYING);
@@ -123,27 +176,16 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
       const currentMult = 1 + (elapsedSec * 0.1) + Math.pow(elapsedSec, 2) * 0.05;
       
       // Calculate visual position
-      // X: time based, max 10 seconds for full width (clamped)
-      // Y: multiplier based
       const progressX = Math.min((elapsedSec / 8) * 100, 100); 
-      // Logarithmic scale for Y to keep it on screen: log10(mult)
       const rawY = Math.log10(currentMult) * 50; 
-      const progressY = Math.min(rawY, 90); // Cap at 90% height
+      const progressY = Math.min(rawY, 90);
 
-      // SVG coordinate system: y=0 is top, y=100 is bottom
-      // We want to start at bottom-left (0, 100) and go to top-right (100, 0)
       const svgX = progressX;
       const svgY = 100 - progressY;
 
       setPlanePosition({ x: svgX, y: svgY });
       
-      // Build path string "M 0 100 L x1 y1 L x2 y2 ..."
-      // For performance, we might just use a Quadratic curve logic or simple line to current point
-      // But creating a trail is better. 
-      // To optimize, we only update state every frame, React handles diffing.
-      // We can just draw a curve from 0,100 to svgX, svgY with a control point.
       const controlX = svgX * 0.5;
-      const controlY = 100;
       setGraphPoints(`M 0 100 Q ${controlX} ${100} ${svgX} ${svgY}`);
       
       if (currentMult >= crashPointRef.current) {
@@ -160,7 +202,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setStatus(GameStatus.CRASHED);
     setMultiplier(finalValue);
-    setPlanePosition({ x, y }); // Freeze position
+    setPlanePosition({ x, y }); 
+    
+    // Release lock so new game can start
+    isCycleActiveRef.current = false;
     
     const currentPrediction = predictionRef.current;
     const predStr = currentPrediction?.type === 'CRASH' ? 'PLAY' : `${currentPrediction?.value}x`;
@@ -175,16 +220,19 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
       timestamp: Date.now()
     });
 
-    setTimeout(() => {
-      startGameCycle();
-    }, 4000);
+    // Only restart automatically if in Auto Mode
+    if (isAutoModeRef.current) {
+      autoRestartTimeoutRef.current = window.setTimeout(() => {
+        if (isAutoModeRef.current) startGameCycle();
+      }, 4000);
+    }
   };
 
   useEffect(() => {
-    startGameCycle();
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
+    // Initial start
+    if (isAutoMode) {
+        startGameCycle();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -206,7 +254,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
 
             {/* SVG Graph Layer */}
             <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                {/* Gradient Fill under curve */}
                 <defs>
                     <linearGradient id="graphGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="rgb(249, 115, 22)" stopOpacity="0.4" />
@@ -274,8 +321,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
                 </div>
             </div>
 
-            {/* Loading Overlay */}
-            {status === GameStatus.IDLE && (
+            {/* AUTO MODE: Loading Overlay */}
+            {isAutoMode && status === GameStatus.IDLE && (
                 <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col items-center justify-center">
                     <div className="relative">
                         <div className="w-24 h-24 border-4 border-slate-700 rounded-full animate-[spin_3s_linear_infinite]"></div>
@@ -285,26 +332,73 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
                         </div>
                     </div>
                     <p className="mt-4 text-slate-400 font-mono text-sm animate-pulse">PREPARING NEXT ROUND</p>
-                    <div className="mt-2 flex gap-2">
-                        <div className="w-2 h-2 bg-orange-500 rounded-full animate-bounce"></div>
-                        <div className="w-2 h-2 bg-orange-500 rounded-full animate-bounce delay-75"></div>
-                        <div className="w-2 h-2 bg-orange-500 rounded-full animate-bounce delay-150"></div>
-                    </div>
                 </div>
             )}
+            
+            {/* MANUAL MODE: Controls Overlay */}
+            {!isAutoMode && (
+                <>
+                     {/* Start Button (When Idle/Init) */}
+                     {status === GameStatus.IDLE && countdown === 0 && (
+                        <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
+                            <button 
+                                onClick={() => startGameCycle()}
+                                className="group relative flex items-center gap-3 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white px-8 py-4 rounded-full font-bold text-lg shadow-xl shadow-indigo-500/20 transition-all hover:scale-105 active:scale-95"
+                            >
+                                <PlayCircle className="w-6 h-6 fill-white/20" />
+                                START PREDICTION
+                                <div className="absolute inset-0 rounded-full ring-2 ring-white/20 group-hover:ring-white/40 transition-all"></div>
+                            </button>
+                        </div>
+                     )}
 
-            {/* Top Bar Info */}
-            <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-20">
+                     {/* Next Button (After Crash) */}
+                     {status === GameStatus.CRASHED && (
+                        <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] z-50 flex items-center justify-center">
+                             <button 
+                                onClick={() => startGameCycle()}
+                                className="group flex items-center gap-3 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-400 hover:to-red-400 text-white px-8 py-4 rounded-full font-bold text-lg shadow-xl shadow-orange-500/20 transition-all hover:scale-105 active:scale-95"
+                            >
+                                <FastForward className="w-6 h-6 fill-white/20" />
+                                NEXT ROUND
+                            </button>
+                        </div>
+                     )}
+                     
+                     {/* Countdown in Manual Mode */}
+                     {status === GameStatus.IDLE && countdown > 0 && (
+                         <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col items-center justify-center">
+                             <div className="text-6xl font-black text-white mb-2 animate-bounce">{countdown}</div>
+                             <div className="text-slate-400 font-mono tracking-widest">LAUNCHING</div>
+                         </div>
+                     )}
+                </>
+            )}
+
+            {/* Top Bar Info & Mode Switch */}
+            <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-20 pointer-events-auto">
                 <div className="bg-slate-900/60 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-2">
                     <Activity className="w-4 h-4 text-orange-500" />
                     <span className="text-xs font-mono text-slate-300">ID: {roundId}</span>
                 </div>
-                <div className={`px-3 py-1.5 rounded-lg border backdrop-blur flex items-center gap-2 transition-colors
-                    ${status === GameStatus.FLYING ? 'bg-green-500/20 border-green-500/30 text-green-400' : 'bg-slate-900/60 border-white/10 text-slate-400'}
-                `}>
-                    <div className={`w-2 h-2 rounded-full ${status === GameStatus.FLYING ? 'bg-green-500 animate-pulse' : 'bg-slate-500'}`}></div>
-                    <span className="text-xs font-bold uppercase">{status}</span>
-                </div>
+                
+                {/* Mode Toggle */}
+                <button 
+                    onClick={() => {
+                        const newMode = !isAutoMode;
+                        setIsAutoMode(newMode);
+                    }}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-all ${
+                        isAutoMode 
+                        ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300' 
+                        : 'bg-slate-700/50 border-slate-600 text-slate-300'
+                    }`}
+                >
+                    <span className="text-[10px] font-bold tracking-wider uppercase">
+                        {isAutoMode ? 'AUTO MODE' : 'MANUAL'}
+                    </span>
+                    {isAutoMode ? <ToggleRight className="w-4 h-4 text-indigo-400" /> : <ToggleLeft className="w-4 h-4" />}
+                </button>
             </div>
         </div>
 
