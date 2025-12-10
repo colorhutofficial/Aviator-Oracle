@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Plane, Activity, SignalHigh, Zap, PlayCircle, FastForward, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Plane, Activity, SignalHigh, Zap, PlayCircle, FastForward, ToggleLeft, ToggleRight, RotateCcw } from 'lucide-react';
 import { HistoryItem, GameStatus, Prediction } from '../types';
 
 interface DashboardProps {
@@ -59,6 +59,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
             clearTimeout(autoRestartTimeoutRef.current);
             autoRestartTimeoutRef.current = null;
         }
+        // Reset to IDLE if switching to manual to allow user to start
+        if (status === GameStatus.IDLE || status === GameStatus.CRASHED) {
+            setStatus(GameStatus.IDLE);
+            setCountdown(0);
+        }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAutoMode]); 
@@ -110,6 +115,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
 
   const startGameCycle = useCallback(() => {
     // Strict Locking: Prevent starting if already flying or cycle active
+    // In manual mode (looping via reset), this check helps debounce
     if (isCycleActiveRef.current) return;
     
     isCycleActiveRef.current = true;
@@ -137,6 +143,35 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
       }
     }
 
+    // MANUAL MODE LOGIC BRANCH
+    if (!isAutoModeRef.current) {
+        // Instant Result
+        setStatus(GameStatus.CRASHED); // Use CRASHED state to show result
+        isCycleActiveRef.current = false; // Release lock immediately
+
+        // Simulate a result for history consistency
+        const r = getSecureRandom();
+        let targetCrash = 1.00;
+        if (r < 0.45) targetCrash = 1.0 + getSecureRandom() * 0.9;
+        else if (r < 0.75) targetCrash = 2.0 + getSecureRandom() * 2;
+        else if (r < 0.90) targetCrash = 4.0 + getSecureRandom() * 6;
+        else targetCrash = 10.0 + getSecureRandom() * 20;
+
+        const predStr = newPrediction.type === 'CRASH' ? 'PLAY' : `${newPrediction.value.toFixed(2)}x`;
+        const actualStr = `${targetCrash.toFixed(2)}x`;
+        
+        onAddHistory({
+            id: Date.now().toString(),
+            roundId: newRoundId,
+            prediction: predStr,
+            actual: actualStr,
+            isCrash: true, 
+            timestamp: Date.now()
+        });
+        return; // Stop here, no flying/countdown
+    }
+
+    // AUTO MODE LOGIC
     setMultiplier(1.00);
     setCountdown(5); 
 
@@ -150,7 +185,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
       }
     }, 1000);
 
-  }, [generatePrediction]);
+  }, [generatePrediction, onAddHistory]);
 
   const startFlyingPhase = (currentRoundId: string) => {
     setStatus(GameStatus.FLYING);
@@ -239,232 +274,253 @@ const Dashboard: React.FC<DashboardProps> = ({ onAddHistory }) => {
   return (
     <div className="glass-panel p-1 rounded-3xl relative overflow-hidden flex flex-col gap-1">
         
-        {/* Main Display Area */}
-        <div className="relative h-80 bg-slate-900 rounded-2xl overflow-hidden border border-slate-800">
+        {/* Header - Always Visible */}
+        <div className="flex justify-between items-center px-4 py-3 bg-slate-900/50 rounded-t-2xl border-b border-white/5">
+            <div className="bg-slate-800/80 px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-orange-500" />
+                <span className="text-xs font-mono text-slate-300">ID: {roundId}</span>
+            </div>
             
-            {/* Grid Background */}
-            <div className="absolute inset-0 opacity-20" 
-                 style={{
-                     backgroundImage: 'linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)',
-                     backgroundSize: '40px 40px',
-                     transform: status === GameStatus.FLYING ? 'translateY(10px)' : 'none',
-                     transition: 'transform 0.1s linear'
-                 }}>
-            </div>
-
-            {/* SVG Graph Layer */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                <defs>
-                    <linearGradient id="graphGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="rgb(249, 115, 22)" stopOpacity="0.4" />
-                        <stop offset="100%" stopColor="rgb(249, 115, 22)" stopOpacity="0" />
-                    </linearGradient>
-                </defs>
-                
-                {status !== GameStatus.IDLE && (
-                    <>
-                        <path d={`${graphPoints} L ${planePosition.x} 100 Z`} fill="url(#graphGradient)" />
-                        <path d={graphPoints} fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round" />
-                    </>
-                )}
-            </svg>
-
-            {/* Plane Element */}
-            {status !== GameStatus.IDLE && (
-                <div 
-                    className={`absolute w-12 h-12 flex items-center justify-center transition-transform duration-75 will-change-transform z-20
-                        ${status === GameStatus.CRASHED ? 'crash-active' : ''}
-                    `}
-                    style={{
-                        left: `${planePosition.x}%`,
-                        top: `${planePosition.y}%`,
-                        transform: 'translate(-50%, -50%)'
-                    }}
-                >
-                    <Plane 
-                        className={`w-full h-full ${status === GameStatus.CRASHED ? 'text-red-500' : 'text-red-500'} drop-shadow-lg`} 
-                        fill={status === GameStatus.CRASHED ? '#ef4444' : '#f97316'}
-                        strokeWidth={0}
-                        style={{
-                            transform: status === GameStatus.FLYING ? 'rotate(-15deg)' : 'rotate(0deg)'
-                        }}
-                    />
-                    {status === GameStatus.FLYING && (
-                        <div className="absolute top-1/2 right-full mr-1 w-16 h-1 bg-gradient-to-r from-transparent to-orange-500/50 blur-sm"></div>
-                    )}
-                </div>
-            )}
-
-             {/* Explosion Effect */}
-             {status === GameStatus.CRASHED && (
-                <div 
-                    className="absolute w-24 h-24 pointer-events-none z-30"
-                    style={{
-                        left: `${planePosition.x}%`,
-                        top: `${planePosition.y}%`,
-                        transform: 'translate(-50%, -50%)'
-                    }}
-                >
-                    <div className="w-full h-full bg-red-500 rounded-full bomb-effect mix-blend-screen blur-md"></div>
-                    <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="text-white font-black text-sm tracking-widest uppercase drop-shadow-md">Flew Away</div>
-                    </div>
-                </div>
-            )}
-
-            {/* Central Big Multiplier */}
-            <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-                <div className={`text-6xl md:text-8xl font-black font-display tracking-tighter transition-all duration-100
-                    ${status === GameStatus.CRASHED ? 'text-red-500 scale-110' : 'text-white'}
-                `}>
-                    {multiplier.toFixed(2)}x
-                </div>
-            </div>
-
-            {/* AUTO MODE: Loading Overlay */}
-            {isAutoMode && status === GameStatus.IDLE && (
-                <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col items-center justify-center">
-                    <div className="relative">
-                        <div className="w-24 h-24 border-4 border-slate-700 rounded-full animate-[spin_3s_linear_infinite]"></div>
-                        <div className="w-24 h-24 border-t-4 border-orange-500 rounded-full absolute top-0 left-0 animate-[spin_1s_linear_infinite]"></div>
-                        <div className="absolute inset-0 flex items-center justify-center">
-                             <span className="text-4xl font-bold text-white">{countdown}</span>
-                        </div>
-                    </div>
-                    <p className="mt-4 text-slate-400 font-mono text-sm animate-pulse">PREPARING NEXT ROUND</p>
-                </div>
-            )}
-            
-            {/* MANUAL MODE: Controls Overlay */}
-            {!isAutoMode && (
-                <>
-                     {/* Start Button (When Idle/Init) */}
-                     {status === GameStatus.IDLE && countdown === 0 && (
-                        <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
-                            <button 
-                                onClick={() => startGameCycle()}
-                                className="group relative flex items-center gap-3 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white px-8 py-4 rounded-full font-bold text-lg shadow-xl shadow-indigo-500/20 transition-all hover:scale-105 active:scale-95"
-                            >
-                                <PlayCircle className="w-6 h-6 fill-white/20" />
-                                START PREDICTION
-                                <div className="absolute inset-0 rounded-full ring-2 ring-white/20 group-hover:ring-white/40 transition-all"></div>
-                            </button>
-                        </div>
-                     )}
-
-                     {/* Next Button (After Crash) */}
-                     {status === GameStatus.CRASHED && (
-                        <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] z-50 flex items-center justify-center">
-                             <button 
-                                onClick={() => startGameCycle()}
-                                className="group flex items-center gap-3 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-400 hover:to-red-400 text-white px-8 py-4 rounded-full font-bold text-lg shadow-xl shadow-orange-500/20 transition-all hover:scale-105 active:scale-95"
-                            >
-                                <FastForward className="w-6 h-6 fill-white/20" />
-                                NEXT ROUND
-                            </button>
-                        </div>
-                     )}
-                     
-                     {/* Countdown in Manual Mode */}
-                     {status === GameStatus.IDLE && countdown > 0 && (
-                         <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col items-center justify-center">
-                             <div className="text-6xl font-black text-white mb-2 animate-bounce">{countdown}</div>
-                             <div className="text-slate-400 font-mono tracking-widest">LAUNCHING</div>
-                         </div>
-                     )}
-                </>
-            )}
-
-            {/* Top Bar Info & Mode Switch */}
-            <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-20 pointer-events-auto">
-                <div className="bg-slate-900/60 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-orange-500" />
-                    <span className="text-xs font-mono text-slate-300">ID: {roundId}</span>
-                </div>
-                
-                {/* Mode Toggle */}
-                <button 
-                    onClick={() => {
-                        const newMode = !isAutoMode;
-                        setIsAutoMode(newMode);
-                    }}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-all ${
-                        isAutoMode 
-                        ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300' 
-                        : 'bg-slate-700/50 border-slate-600 text-slate-300'
-                    }`}
-                >
-                    <span className="text-[10px] font-bold tracking-wider uppercase">
-                        {isAutoMode ? 'AUTO MODE' : 'MANUAL'}
-                    </span>
-                    {isAutoMode ? <ToggleRight className="w-4 h-4 text-indigo-400" /> : <ToggleLeft className="w-4 h-4" />}
-                </button>
-            </div>
+            {/* Mode Toggle */}
+            <button 
+                onClick={() => {
+                    const newMode = !isAutoMode;
+                    setIsAutoMode(newMode);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-all ${
+                    isAutoMode 
+                    ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300' 
+                    : 'bg-slate-700/50 border-slate-600 text-slate-300'
+                }`}
+            >
+                <span className="text-[10px] font-bold tracking-wider uppercase">
+                    {isAutoMode ? 'AUTO MODE' : 'MANUAL'}
+                </span>
+                {isAutoMode ? <ToggleRight className="w-4 h-4 text-indigo-400" /> : <ToggleLeft className="w-4 h-4" />}
+            </button>
         </div>
 
-        {/* HUD / Prediction Panel */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-1 mt-1">
-            {/* Prediction Card */}
-            <div className="bg-slate-800/40 p-5 rounded-2xl border border-white/5 relative overflow-hidden group">
-                <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 to-purple-500/5 group-hover:from-indigo-500/10 transition-colors"></div>
+        {/* Auto Mode: Full Animation Display */}
+        {isAutoMode && (
+            <div className="relative h-80 bg-slate-900 rounded-b-2xl overflow-hidden border border-slate-800 border-t-0 -mt-1">
                 
-                <div className="relative z-10">
-                    <div className="flex items-center gap-2 mb-2 text-indigo-400">
-                        <Zap className="w-4 h-4" />
-                        <h3 className="text-xs font-bold uppercase tracking-widest">AI Forecast</h3>
-                    </div>
+                {/* Grid Background */}
+                <div className="absolute inset-0 opacity-20" 
+                    style={{
+                        backgroundImage: 'linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)',
+                        backgroundSize: '40px 40px',
+                        transform: status === GameStatus.FLYING ? 'translateY(10px)' : 'none',
+                        transition: 'transform 0.1s linear'
+                    }}>
+                </div>
+
+                {/* SVG Graph Layer */}
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <defs>
+                        <linearGradient id="graphGradient" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="rgb(249, 115, 22)" stopOpacity="0.4" />
+                            <stop offset="100%" stopColor="rgb(249, 115, 22)" stopOpacity="0" />
+                        </linearGradient>
+                    </defs>
                     
-                    <div className="flex items-baseline gap-1">
-                        {prediction ? (
-                            <>
-                                <span className={`text-3xl font-black font-display tracking-tight ${
-                                    prediction.type === 'CRASH' ? 'text-yellow-400' : 'text-indigo-300'
-                                }`}>
-                                    {prediction.type === 'CRASH' ? 'PLAY' : prediction.value.toFixed(2)}
-                                </span>
-                                {prediction.type !== 'CRASH' && <span className="text-sm font-bold text-slate-500">x</span>}
-                            </>
-                        ) : (
-                            <span className="text-3xl font-black text-slate-700">---</span>
+                    {status !== GameStatus.IDLE && (
+                        <>
+                            <path d={`${graphPoints} L ${planePosition.x} 100 Z`} fill="url(#graphGradient)" />
+                            <path d={graphPoints} fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round" />
+                        </>
+                    )}
+                </svg>
+
+                {/* Plane Element */}
+                {status !== GameStatus.IDLE && (
+                    <div 
+                        className={`absolute w-12 h-12 flex items-center justify-center transition-transform duration-75 will-change-transform z-20
+                            ${status === GameStatus.CRASHED ? 'crash-active' : ''}
+                        `}
+                        style={{
+                            left: `${planePosition.x}%`,
+                            top: `${planePosition.y}%`,
+                            transform: 'translate(-50%, -50%)'
+                        }}
+                    >
+                        <Plane 
+                            className={`w-full h-full ${status === GameStatus.CRASHED ? 'text-red-500' : 'text-red-500'} drop-shadow-lg`} 
+                            fill={status === GameStatus.CRASHED ? '#ef4444' : '#f97316'}
+                            strokeWidth={0}
+                            style={{
+                                transform: status === GameStatus.FLYING ? 'rotate(-15deg)' : 'rotate(0deg)'
+                            }}
+                        />
+                        {status === GameStatus.FLYING && (
+                            <div className="absolute top-1/2 right-full mr-1 w-16 h-1 bg-gradient-to-r from-transparent to-orange-500/50 blur-sm"></div>
                         )}
                     </div>
-                    
-                    <div className="mt-2 text-xs text-slate-500 font-mono">
-                        Algorithm v4.2 Active
-                    </div>
-                </div>
-            </div>
+                )}
 
-            {/* Confidence Card */}
-            <div className="bg-slate-800/40 p-5 rounded-2xl border border-white/5 relative overflow-hidden">
-                 <div className="relative z-10">
-                    <div className="flex items-center gap-2 mb-2 text-emerald-400">
-                        <SignalHigh className="w-4 h-4" />
-                        <h3 className="text-xs font-bold uppercase tracking-widest">Confidence</h3>
+                {/* Explosion Effect */}
+                {status === GameStatus.CRASHED && (
+                    <div 
+                        className="absolute w-24 h-24 pointer-events-none z-30"
+                        style={{
+                            left: `${planePosition.x}%`,
+                            top: `${planePosition.y}%`,
+                            transform: 'translate(-50%, -50%)'
+                        }}
+                    >
+                        <div className="w-full h-full bg-red-500 rounded-full bomb-effect mix-blend-screen blur-md"></div>
+                        <div className="absolute inset-0 flex items-center justify-center">
+                            <div className="text-white font-black text-sm tracking-widest uppercase drop-shadow-md">Flew Away</div>
+                        </div>
                     </div>
-                    
-                    <div className="flex items-end justify-between">
-                         <span className="text-3xl font-black font-display text-white">
-                             {prediction ? prediction.confidence : '--'}%
-                         </span>
-                         <div className="flex gap-0.5 mb-1.5">
-                             {[1,2,3,4,5].map(i => (
-                                 <div key={i} className={`w-1.5 h-4 rounded-sm ${
-                                     prediction && (prediction.confidence / 20) >= i ? 'bg-emerald-500' : 'bg-slate-700'
-                                 }`}></div>
-                             ))}
-                         </div>
+                )}
+
+                {/* Central Big Multiplier */}
+                <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+                    <div className={`text-6xl md:text-8xl font-black font-display tracking-tighter transition-all duration-100
+                        ${status === GameStatus.CRASHED ? 'text-red-500 scale-110' : 'text-white'}
+                    `}>
+                        {multiplier.toFixed(2)}x
                     </div>
+                </div>
+
+                {/* AUTO MODE: Loading Overlay */}
+                {status === GameStatus.IDLE && (
+                    <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col items-center justify-center">
+                        <div className="relative">
+                            <div className="w-24 h-24 border-4 border-slate-700 rounded-full animate-[spin_3s_linear_infinite]"></div>
+                            <div className="w-24 h-24 border-t-4 border-orange-500 rounded-full absolute top-0 left-0 animate-[spin_1s_linear_infinite]"></div>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <span className="text-4xl font-bold text-white">{countdown}</span>
+                            </div>
+                        </div>
+                        <p className="mt-4 text-slate-400 font-mono text-sm animate-pulse">PREPARING NEXT ROUND</p>
+                    </div>
+                )}
+            </div>
+        )}
+        
+        {/* Manual Mode: Simplified View */}
+        {!isAutoMode && (
+            <div className="relative bg-slate-900 rounded-b-2xl overflow-hidden border border-slate-800 border-t-0 -mt-1 p-6 flex flex-col items-center justify-center min-h-[360px]">
+                 
+                 {/* IDLE: Start Button */}
+                 {status === GameStatus.IDLE && (
+                     <button 
+                        onClick={() => startGameCycle()}
+                        className="group relative flex items-center gap-3 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white px-8 py-5 rounded-2xl font-bold text-xl shadow-xl shadow-indigo-500/20 transition-all hover:scale-105 active:scale-95 w-full justify-center max-w-sm"
+                    >
+                        <Zap className="w-7 h-7 fill-white/20" />
+                        GET AI SIGNAL
+                    </button>
+                 )}
+
+                 {/* RESULT DISPLAY */}
+                 {status === GameStatus.CRASHED && prediction && (
+                      <div key={roundId} className="flex flex-col items-center w-full animate-in fade-in zoom-in duration-300">
+                           <div className="text-slate-500 text-sm font-bold tracking-[0.2em] uppercase mb-4">AI Forecast</div>
+                           
+                           {/* Main Signal */}
+                           <div className="relative mb-6">
+                               <div className={`absolute inset-0 blur-3xl opacity-20 ${
+                                    prediction.type === 'CRASH' ? 'bg-yellow-500' : 'bg-indigo-500'
+                               }`}></div>
+                               <div className={`relative text-7xl md:text-8xl font-black font-display tracking-tight ${
+                                    prediction.type === 'CRASH' ? 'text-yellow-400 drop-shadow-[0_0_15px_rgba(250,204,21,0.5)]' : 'text-indigo-400 drop-shadow-[0_0_15px_rgba(129,140,248,0.5)]'
+                               }`}>
+                                    {prediction.type === 'CRASH' ? 'PLAY' : `${prediction.value.toFixed(2)}x`}
+                               </div>
+                           </div>
+
+                           {/* Confidence Info */}
+                           <div className="flex items-center gap-3 mb-8 bg-slate-800/50 px-4 py-2 rounded-full border border-white/5">
+                                <div className="text-slate-400 text-xs font-semibold uppercase">Confidence</div>
+                                <div className="w-24 h-2 bg-slate-700 rounded-full overflow-hidden">
+                                     <div 
+                                        className="h-full bg-emerald-500"
+                                        style={{ width: `${prediction.confidence}%` }}
+                                     ></div>
+                                </div>
+                                <span className="text-emerald-400 font-mono font-bold text-sm">{prediction.confidence}%</span>
+                           </div>
+
+                           {/* Generate Next Button */}
+                           <button 
+                                onClick={() => startGameCycle()}
+                                className="group flex items-center gap-2 text-slate-400 hover:text-white transition-colors bg-white/5 hover:bg-white/10 px-6 py-2.5 rounded-xl border border-white/5 hover:border-white/10"
+                            >
+                                <Zap className="w-4 h-4 group-hover:fill-current transition-all duration-300" />
+                                <span className="text-sm font-semibold">Generate Next Signal</span>
+                            </button>
+                      </div>
+                 )}
+            </div>
+        )}
+
+        {/* HUD / Prediction Panel - Auto Mode Only */}
+        {isAutoMode && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-1 mt-1">
+                {/* Prediction Card */}
+                <div className="bg-slate-800/40 p-5 rounded-2xl border border-white/5 relative overflow-hidden group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 to-purple-500/5 group-hover:from-indigo-500/10 transition-colors"></div>
                     
-                    <div className="mt-2 w-full bg-slate-700/50 h-1 rounded-full overflow-hidden">
-                        <div 
-                            className="h-full bg-emerald-500 transition-all duration-500"
-                            style={{ width: prediction ? `${prediction.confidence}%` : '0%' }}
-                        ></div>
+                    <div className="relative z-10">
+                        <div className="flex items-center gap-2 mb-2 text-indigo-400">
+                            <Zap className="w-4 h-4" />
+                            <h3 className="text-xs font-bold uppercase tracking-widest">AI Forecast</h3>
+                        </div>
+                        
+                        <div className="flex items-baseline gap-1">
+                            {prediction ? (
+                                <>
+                                    <span className={`text-3xl font-black font-display tracking-tight ${
+                                        prediction.type === 'CRASH' ? 'text-yellow-400' : 'text-indigo-300'
+                                    }`}>
+                                        {prediction.type === 'CRASH' ? 'PLAY' : prediction.value.toFixed(2)}
+                                    </span>
+                                    {prediction.type !== 'CRASH' && <span className="text-sm font-bold text-slate-500">x</span>}
+                                </>
+                            ) : (
+                                <span className="text-3xl font-black text-slate-700">---</span>
+                            )}
+                        </div>
+                        
+                        <div className="mt-2 text-xs text-slate-500 font-mono">
+                            Algorithm v4.2 Active
+                        </div>
+                    </div>
+                </div>
+
+                {/* Confidence Card */}
+                <div className="bg-slate-800/40 p-5 rounded-2xl border border-white/5 relative overflow-hidden">
+                     <div className="relative z-10">
+                        <div className="flex items-center gap-2 mb-2 text-emerald-400">
+                            <SignalHigh className="w-4 h-4" />
+                            <h3 className="text-xs font-bold uppercase tracking-widest">Confidence</h3>
+                        </div>
+                        
+                        <div className="flex items-end justify-between">
+                             <span className="text-3xl font-black font-display text-white">
+                                 {prediction ? prediction.confidence : '--'}%
+                             </span>
+                             <div className="flex gap-0.5 mb-1.5">
+                                 {[1,2,3,4,5].map(i => (
+                                     <div key={i} className={`w-1.5 h-4 rounded-sm ${
+                                         prediction && (prediction.confidence / 20) >= i ? 'bg-emerald-500' : 'bg-slate-700'
+                                     }`}></div>
+                                 ))}
+                             </div>
+                        </div>
+                        
+                        <div className="mt-2 w-full bg-slate-700/50 h-1 rounded-full overflow-hidden">
+                            <div 
+                                className="h-full bg-emerald-500 transition-all duration-500"
+                                style={{ width: prediction ? `${prediction.confidence}%` : '0%' }}
+                            ></div>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
+        )}
     </div>
   );
 };
